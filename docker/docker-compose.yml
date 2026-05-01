@@ -1,0 +1,128 @@
+# =============================================================================
+# Local Prime Service stack
+# =============================================================================
+# Topology (Task 2 of the case study):
+#
+#   ┌──────────────────────── Host (Linux/macOS/WSL2) ───────────────────────┐
+#   │                                                                        │
+#   │     UDP/51820 (only port published to host)                            │
+#   │            │                                                           │
+#   │            ▼                                                           │
+#   │   ┌────────────────┐                                                   │
+#   │   │   wg (WireGuard│        prime_internal  (172.28.0.0/24)            │
+#   │   │   VPN gateway) │◀──────────────────────────────────────────────┐   │
+#   │   └────────────────┘                                               │   │
+#   │            ▲    routes 172.28.0.0/24 to peers                      │   │
+#   │            │                                                       │   │
+#   │            │     ┌─────────────────┐      ┌────────────────────┐   │   │
+#   │            └────▶│  api (FastAPI)  │─────▶│  db (PostgreSQL 16)│   │   │
+#   │                  │  172.28.0.20    │      │  172.28.0.10       │   │   │
+#   │                  └─────────────────┘      └────────────────────┘   │   │
+#   │                                                                    │   │
+#   └────────────────────────────────────────────────────────────────────┴───┘
+#
+# Key security properties:
+#   * The api and db services have NO `ports:` mapping -> not reachable from
+#     the host or the public internet directly.
+#   * Only `wg` publishes UDP/51820 (WireGuard).
+#   * Peers connecting via WireGuard are routed to 172.28.0.0/24, where the
+#     api listens on :8080. The DB is only reachable from the api container.
+# =============================================================================
+
+version: "3.9"
+
+networks:
+  prime_internal:
+    name: prime_internal
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+volumes:
+  prime_db_data:
+    name: prime_db_data
+
+services:
+  # -------------------------------------------------------------------------
+  # PostgreSQL database
+  # -------------------------------------------------------------------------
+  db:
+    image: postgres:16-alpine
+    container_name: prime_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-prime}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-primes}
+    volumes:
+      - prime_db_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      prime_internal:
+        ipv4_address: 172.28.0.10
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-prime} -d ${POSTGRES_DB:-primes}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # -------------------------------------------------------------------------
+  # API service
+  # -------------------------------------------------------------------------
+  api:
+    build:
+      context: ../app
+      dockerfile: Dockerfile
+    image: prime-service:local
+    container_name: prime_api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-prime}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-primes}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PRIME_MAX_RANGE: ${PRIME_MAX_RANGE:-10000000}
+    networks:
+      prime_internal:
+        ipv4_address: 172.28.0.20
+    depends_on:
+      db:
+        condition: service_healthy
+    # NB: deliberately no `ports:` block. The API is reachable ONLY from
+    # inside prime_internal, which means via WireGuard.
+
+  # -------------------------------------------------------------------------
+  # WireGuard VPN gateway
+  # -------------------------------------------------------------------------
+  # On `up`, this container generates `PEERS` peer config(s) under
+  #   ./wireguard/config/peer{N}/peer{N}.conf
+  # plus a QR code PNG. Distribute these to the operators that should be
+  # allowed in. Their tunnel routes 172.28.0.0/24 (and 10.13.13.0/24) to
+  # the gateway, which then forwards on the internal bridge network.
+  # -------------------------------------------------------------------------
+  wg:
+    image: lscr.io/linuxserver/wireguard:latest
+    container_name: prime_wg
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: Etc/UTC
+      SERVERURL: ${WG_SERVER_URL:-auto}
+      SERVERPORT: "51820"
+      PEERS: ${WG_PEERS:-1}
+      PEERDNS: auto
+      INTERNAL_SUBNET: 10.13.13.0
+      ALLOWEDIPS: 172.28.0.0/24,10.13.13.0/24
+    volumes:
+      - ./wireguard/config:/config
+      - /lib/modules:/lib/modules
+    ports:
+      - "51820:51820/udp"
+    networks:
+      prime_internal:
+        ipv4_address: 172.28.0.2
