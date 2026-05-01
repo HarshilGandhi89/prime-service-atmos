@@ -1,0 +1,59 @@
+# =============================================================================
+# Equivalent GitHub Actions workflow (use if not on AWS CodePipeline).
+# =============================================================================
+name: prime-service-ci
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+permissions:
+  id-token: write   # for OIDC -> AWS
+  contents: read
+
+jobs:
+  test:
+    name: Lint + unit tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: app/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check src tests
+      - run: pytest -q --cov=src
+
+  build-and-push:
+    name: Build & push image
+    needs: test
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::000000000000:role/atm-plat-prime-gh-oidc
+          aws-region: eu-central-1
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+      - name: Build and push
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+          ECR_REPO: ${{ steps.ecr.outputs.registry }}/atm-plat-prime-${{ github.ref_name == 'main' && 'prod' || 'dev' }}-ecr
+        run: |
+          docker build -t $ECR_REPO:$IMAGE_TAG -t $ECR_REPO:latest app
+          docker push $ECR_REPO:$IMAGE_TAG
+          docker push $ECR_REPO:latest
+      - name: Trigger ECS rolling deploy
+        run: |
+          aws ecs update-service --cluster atm-plat-prime-${{ github.ref_name == 'main' && 'prod' || 'dev' }}-ecs \
+            --service atm-plat-prime-${{ github.ref_name == 'main' && 'prod' || 'dev' }}-svc-api \
+            --force-new-deployment

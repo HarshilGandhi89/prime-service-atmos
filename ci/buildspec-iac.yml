@@ -1,0 +1,51 @@
+# =============================================================================
+# IaC validation + apply pipeline (mirrors playbook's "IaC Terraform Pipeline")
+# =============================================================================
+# Stages:
+#   1. fetch state-bucket creds
+#   2. terraform init
+#   3. terraform fmt -check + validate
+#   4. tflint + checkov (security policy-as-code)
+#   5. terraform plan (artifact uploaded for manual approval)
+#   6. (manual approval gate in CodePipeline)
+#   7. terraform apply
+# =============================================================================
+version: 0.2
+
+env:
+  variables:
+    TF_VERSION: 1.9.8
+    TF_DIR: terraform
+    TF_ENV: dev   # set per-pipeline; prod pipeline overrides
+
+phases:
+  install:
+    commands:
+      - echo "Installing Terraform $TF_VERSION"
+      - curl -fsSL -o /tmp/tf.zip https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip
+      - unzip -o /tmp/tf.zip -d /usr/local/bin
+      - terraform version
+      - pip install checkov tflint || true
+
+  pre_build:
+    commands:
+      - cd $TF_DIR
+      - terraform fmt -check -recursive
+      - terraform init -backend-config=envs/${TF_ENV}.backend.hcl
+      - terraform validate
+      - checkov -d . --quiet --soft-fail
+      - tflint --init && tflint || true
+
+  build:
+    commands:
+      - terraform plan -var-file=envs/${TF_ENV}.tfvars -out=tfplan.bin
+      - terraform show -json tfplan.bin > tfplan.json
+
+  post_build:
+    commands:
+      - echo "Plan ready. Manual approval required before apply."
+
+artifacts:
+  files:
+    - terraform/tfplan.bin
+    - terraform/tfplan.json

@@ -1,0 +1,72 @@
+# =============================================================================
+# AWS CodeBuild build spec for the Prime Service.
+# =============================================================================
+# Mirrors the playbook's "NOC Application Pipeline" (App delivery).
+# Stage list:
+#   1. install dependencies
+#   2. lint + unit tests
+#   3. build container image
+#   4. vulnerability scan (ECR scan-on-push)
+#   5. push image with commit-sha tag
+#   6. trigger ECS update-service (rolling deploy)
+# =============================================================================
+version: 0.2
+
+env:
+  variables:
+    AWS_DEFAULT_REGION: eu-central-1
+    APP_DIR: app
+  parameter-store:
+    ECR_REPO_URI: "/atm/plat/prime/dev/ecr-uri"
+    ECS_CLUSTER:  "/atm/plat/prime/dev/ecs-cluster"
+    ECS_SERVICE:  "/atm/plat/prime/dev/ecs-service"
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.12
+    commands:
+      - python -m pip install --upgrade pip
+      - pip install -r ${APP_DIR}/requirements-dev.txt
+
+  pre_build:
+    commands:
+      - echo "Linting"
+      - cd ${APP_DIR} && ruff check src tests && cd -
+      - echo "Running unit tests"
+      - cd ${APP_DIR} && pytest -q --maxfail=1 --disable-warnings --cov=src --cov-report=term-missing && cd -
+      - echo "Logging in to Amazon ECR"
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin ${ECR_REPO_URI%/*}
+      - IMAGE_TAG=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c1-12)
+      - echo "Image tag = $IMAGE_TAG"
+
+  build:
+    commands:
+      - echo "Building image"
+      - docker build -t prime-service:$IMAGE_TAG ${APP_DIR}
+      - docker tag prime-service:$IMAGE_TAG $ECR_REPO_URI:$IMAGE_TAG
+      - docker tag prime-service:$IMAGE_TAG $ECR_REPO_URI:latest
+
+  post_build:
+    commands:
+      - echo "Pushing image to ECR"
+      - docker push $ECR_REPO_URI:$IMAGE_TAG
+      - docker push $ECR_REPO_URI:latest
+      - echo "Triggering ECS rolling deploy"
+      - aws ecs update-service --cluster $ECS_CLUSTER --service $ECS_SERVICE --force-new-deployment > /dev/null
+      - echo "Build complete: $IMAGE_TAG"
+
+artifacts:
+  files:
+    - imagedefinitions.json
+  discard-paths: yes
+
+reports:
+  pytest:
+    files:
+      - "${APP_DIR}/junit.xml"
+    file-format: JUNITXML
+
+cache:
+  paths:
+    - "/root/.cache/pip/**/*"
