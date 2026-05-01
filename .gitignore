@@ -1,0 +1,65 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg
+
+# Node (only used to build the playbook DOCX)
+node_modules/
+package-lock.json
+package.json
+
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+crash.log
+crash.*.log
+tfplan.bin
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Docker
+.env
+docker/wireguard/config/
+
+# Secrets / certs (Client VPN PKI)
+.pki/
+*.pem
+*.key
+*.crt
+!**/test-fixtures/*.pem
+
+# Build artefacts
+build/
+dist/
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Local SQLite databases (dev only)
+*.sqlite
+*.sqlite3
+*.db
+prime_dev.db
+test.db
